@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" lang="en">
+  <title>redact release notes</title>
+  <updated>2026-11-07T00:00:00Z</updated>
+  <author>
+    <name>redact</name>
+    <uri>https://example.com/redact</uri>
+  </author>
+  <entry id="1">
+    <title>Preview mode</title>
+    <summary>Markdown, JSON, TOML and XML render as documents.</summary>
+    <tags>
+      <tag>editor</tag>
+      <tag>preview</tag>
+    </tags>
+  </entry>
+  <entry id="2">
+    <title>Problems pane</title>
+    <summary>Every diagnostic in the project, grouped by file.</summary>
+  </entry>
+</feed>

@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<root attr="1">
+  <item id="a">correctly closed</item>
+  <item id="b">closed with the wrong name</wrong>
+</root>

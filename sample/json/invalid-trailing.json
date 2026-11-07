@@ -1,0 +1,6 @@
+{
+  "name": "redact",
+  "tags": ["a", "b"],
+  "ok": true
+  "missingComma": "the error is on this line"
+}

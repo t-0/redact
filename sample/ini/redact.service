@@ -1,0 +1,13 @@
+; systemd units use INI syntax, so they highlight the same way
+[Unit]
+Description=redact background checker
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/redact --check
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

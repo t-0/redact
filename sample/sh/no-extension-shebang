@@ -1,0 +1,5 @@
+#!/bin/sh
+# No extension: detected as shell from the shebang alone.
+for d in /etc /usr /var; do
+    [ -d "$d" ] && echo "$d exists"
+done

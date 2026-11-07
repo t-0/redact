@@ -1,0 +1,27 @@
+# TOML sample
+title = "redact settings"
+updated = 2026-11-07
+
+[ui]
+left_width = 34
+theme = "dark-pastel"
+tab_width = 4
+show_whitespace = false
+
+[ui.colors]
+keyword = "#c9a0dc"
+string = "#b5e8b0"
+number = "#ffb7b2"
+
+[[pane]]
+name = "explorer"
+key = "f2"
+
+[[pane]]
+name = "problems"
+key = "ctrl+k e"
+
+[checkers]
+rust = ["cargo", "check", "--all-targets"]
+python = ["ruff", "check"]
+timeout_seconds = 30
