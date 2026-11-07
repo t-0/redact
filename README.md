@@ -224,3 +224,9 @@ in the terminal profile.
 - understanding `cargo` / `uv` as a build system (problems pane, jump to error)
 - debugging view for Rust (lldb/codelldb) and Python (debugpy) that just works
 - rope-backed buffer for very large files; mouse support
+
+## Versions
+
+### v1.1
+
+- faster startup on large directories

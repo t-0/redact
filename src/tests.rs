@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TestStatus {
@@ -46,10 +46,18 @@ pub struct TestsPane {
     visible: Vec<usize>,
     pub rx: Option<Receiver<TestEvent>>,
     pub running: bool,
+    /// In-flight discovery, if any; its result replaces `nodes` when it lands.
+    discover_rx: Option<Receiver<Vec<TestNode>>>,
+    /// A rescan was requested while one was already running.
+    discover_again: bool,
 }
 
-fn walk_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
-    if depth > 12 {
+/// Upper bound on directory entries visited during one discovery pass, so a
+/// pathological root (a home directory, say) stays cheap and bounded.
+const WALK_BUDGET: usize = 100_000;
+
+fn walk_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize, budget: &mut usize) {
+    if depth > 12 || *budget == 0 {
         return;
     }
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -58,28 +66,53 @@ fn walk_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     let mut entries: Vec<_> = rd.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
         let p = e.path();
         let name = e.file_name().to_string_lossy().into_owned();
-        if p.is_dir() {
-            if matches!(
-                name.as_str(),
-                ".git"
-                    | "target"
-                    | "node_modules"
-                    | ".venv"
-                    | "venv"
-                    | "__pycache__"
-                    | ".pytest_cache"
-                    | "build"
-                    | "dist"
-            ) {
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            // Hidden directories hold toolchains, caches and registries
+            // (~/.cargo, ~/.rustup, ~/.cache, .venv) full of sources that are
+            // never this project's tests.
+            if name.starts_with('.')
+                || matches!(
+                    name.as_str(),
+                    "target"
+                        | "node_modules"
+                        | "venv"
+                        | "__pycache__"
+                        | "site-packages"
+                        | "build"
+                        | "dist"
+                )
+            {
                 continue;
             }
-            walk_files(&p, out, depth + 1);
+            walk_files(&p, out, depth + 1, budget);
         } else if name.ends_with(".rs") || name.ends_with(".py") {
             out.push(p);
         }
     }
+}
+
+/// Walk `root` and parse every Rust/Python source for tests. Runs on a
+/// background thread; see `TestsPane::discover`.
+fn discover_nodes(root: &Path) -> Vec<TestNode> {
+    let mut files = Vec::new();
+    let mut budget = WALK_BUDGET;
+    walk_files(root, &mut files, 0, &mut budget);
+    let mut nodes = Vec::new();
+    for f in files {
+        if f.extension().map(|e| e == "rs").unwrap_or(false) {
+            discover_rust(root, &f, &mut nodes);
+        } else {
+            discover_python(root, &f, &mut nodes);
+        }
+    }
+    nodes
 }
 
 /// Module path prefix for a Rust source file relative to its crate root.
@@ -331,20 +364,53 @@ impl TestsPane {
             visible: Vec::new(),
             rx: None,
             running: false,
+            discover_rx: None,
+            discover_again: false,
         }
     }
 
+    /// Start (or queue) a background scan of `root`; results arrive through
+    /// `pump_discovery`. Never blocks, so a huge root cannot stall startup.
     pub fn discover(&mut self, root: &Path) {
-        let mut files = Vec::new();
-        walk_files(root, &mut files, 0);
-        let mut nodes = Vec::new();
-        for f in files {
-            if f.extension().map(|e| e == "rs").unwrap_or(false) {
-                discover_rust(root, &f, &mut nodes);
-            } else {
-                discover_python(root, &f, &mut nodes);
-            }
+        if self.discover_rx.is_some() {
+            self.discover_again = true;
+            return;
         }
+        let (tx, rx) = channel();
+        let root = root.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(discover_nodes(&root));
+        });
+        self.discover_rx = Some(rx);
+    }
+
+    pub fn discovering(&self) -> bool {
+        self.discover_rx.is_some()
+    }
+
+    /// Pick up a finished scan. Returns true when the node list was replaced.
+    pub fn pump_discovery(&mut self, root: &Path) -> bool {
+        let Some(rx) = &self.discover_rx else {
+            return false;
+        };
+        let nodes = match rx.try_recv() {
+            Ok(n) => n,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => {
+                self.discover_rx = None;
+                return false;
+            }
+        };
+        self.discover_rx = None;
+        self.install(nodes);
+        if self.discover_again {
+            self.discover_again = false;
+            self.discover(root);
+        }
+        true
+    }
+
+    fn install(&mut self, mut nodes: Vec<TestNode>) {
         // keep previous statuses where filters match
         for n in nodes.iter_mut() {
             if let Some(old) = self

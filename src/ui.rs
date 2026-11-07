@@ -245,10 +245,12 @@ fn draw_tests(f: &mut Frame, tests: &mut TestsPane, area: Rect, focused: bool) {
     clamp_scroll(&mut tests.scroll, tests.selected, rows);
     let mut lines: Vec<Line> = Vec::new();
     if tests.nodes.is_empty() {
-        lines.push(Line::from(Span::styled(
-            " no tests found (r to rescan)",
-            theme::dim(),
-        )));
+        let msg = if tests.discovering() {
+            " discovering tests…"
+        } else {
+            " no tests found (r to rescan)"
+        };
+        lines.push(Line::from(Span::styled(msg, theme::dim())));
     }
     let visible: Vec<usize> = tests.visible().to_vec();
     for (i, &ni) in visible.iter().enumerate().skip(tests.scroll).take(rows) {
