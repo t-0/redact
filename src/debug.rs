@@ -198,25 +198,123 @@ fn python_targets(root: &Path, active: Option<&Path>) -> Vec<Target> {
     t
 }
 
-fn lldb_dap_path() -> Option<String> {
-    if let Ok(p) = std::env::var("REDACT_LLDB_DAP") {
-        return Some(p);
+/// Directories searched for an executable, in order: `$PATH`, then the places
+/// distro and Homebrew LLVM packages put binaries that are not on `$PATH`.
+fn search_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    // Debian/Ubuntu: /usr/lib/llvm-NN/bin; only versioned symlinks reach /usr/bin.
+    if let Ok(rd) = std::fs::read_dir("/usr/lib") {
+        let mut llvm: Vec<PathBuf> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("llvm-"))
+                    .unwrap_or(false)
+            })
+            .map(|p| p.join("bin"))
+            .collect();
+        llvm.sort_by_key(|p| std::cmp::Reverse(llvm_version(p.parent().unwrap())));
+        dirs.extend(llvm);
     }
-    for cand in ["lldb-dap", "lldb-vscode"] {
-        if Command::new("which")
-            .arg(cand)
-            .stdout(Stdio::null())
-            .status()
-            .map(|s| s.success())
+    // macOS Homebrew (arm64 and x86_64), and a plain `make install` of LLVM.
+    for d in [
+        "/opt/homebrew/opt/llvm/bin",
+        "/usr/local/opt/llvm/bin",
+        "/usr/local/llvm/bin",
+        "/opt/llvm/bin",
+    ] {
+        dirs.push(PathBuf::from(d));
+    }
+    dirs
+}
+
+/// `NN` from a path ending in `llvm-NN`, or 0.
+fn llvm_version(dir: &Path) -> u32 {
+    dir.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix("llvm-"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+fn is_executable(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
             .unwrap_or(false)
-        {
-            return Some(cand.to_string());
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
+    }
+}
+
+/// First `name` found in `dirs`, as a full path.
+fn find_in(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
+    dirs.iter().map(|d| d.join(name)).find(|p| is_executable(p))
+}
+
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    find_in(&dirs, name)
+}
+
+/// The lldb DAP adapter: an exact `lldb-dap` / `lldb-vscode` (the pre-18 name)
+/// in `dirs` wins, otherwise the highest-versioned `lldb-dap-NN` /
+/// `lldb-vscode-NN` that distro packages install alongside.
+fn find_lldb_dap_in(dirs: &[PathBuf]) -> Option<PathBuf> {
+    for name in ["lldb-dap", "lldb-vscode"] {
+        if let Some(p) = find_in(dirs, name) {
+            return Some(p);
         }
     }
-    if let Ok(out) = Command::new("xcrun")
-        .args(["-f", "lldb-dap"])
-        .stderr(Stdio::null())
-        .output()
+    let mut best: Option<(u32, PathBuf)> = None;
+    for d in dirs {
+        let Ok(rd) = std::fs::read_dir(d) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let ver = name
+                .strip_prefix("lldb-dap-")
+                .or_else(|| name.strip_prefix("lldb-vscode-"))
+                .and_then(|v| v.parse::<u32>().ok());
+            if let Some(v) = ver
+                && is_executable(&p)
+                && best.as_ref().map(|(b, _)| v > *b).unwrap_or(true)
+            {
+                best = Some((v, p));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+fn lldb_dap_path() -> Option<String> {
+    if let Ok(p) = std::env::var("REDACT_LLDB_DAP")
+        && !p.is_empty()
+    {
+        return Some(p);
+    }
+    if let Some(p) = find_lldb_dap_in(&search_dirs()) {
+        return Some(p.to_string_lossy().into_owned());
+    }
+    if cfg!(target_os = "macos")
+        && let Ok(out) = Command::new("xcrun")
+            .args(["-f", "lldb-dap"])
+            .stderr(Stdio::null())
+            .output()
         && out.status.success()
     {
         let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -225,6 +323,15 @@ fn lldb_dap_path() -> Option<String> {
         }
     }
     None
+}
+
+/// What to do about a missing adapter, for the platform we are on.
+fn lldb_dap_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "install Xcode command line tools, or `brew install llvm`, or set REDACT_LLDB_DAP"
+    } else {
+        "install your distro's lldb package (apt install lldb / dnf install lldb / pacman -S lldb), or set REDACT_LLDB_DAP"
+    }
 }
 
 fn rust_init_commands() -> Vec<String> {
@@ -251,12 +358,7 @@ fn rust_init_commands() -> Vec<String> {
 
 fn python_adapter(root: &Path) -> (String, Vec<String>) {
     let uv_project = root.join("pyproject.toml").exists() || root.join("uv.lock").exists();
-    let has_uv = Command::new("which")
-        .arg("uv")
-        .stdout(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let has_uv = find_on_path("uv").is_some();
     if has_uv {
         let mut args = vec!["run".to_string(), "--with".into(), "debugpy".into()];
         if !uv_project {
@@ -585,8 +687,7 @@ impl Debugger {
 
     fn start_lldb(&mut self, root: &Path, exe: PathBuf, target: Target) -> String {
         let Some(adapter) = lldb_dap_path() else {
-            return "lldb-dap not found (install Xcode command line tools or set REDACT_LLDB_DAP)"
-                .into();
+            return format!("lldb-dap not found: {}", lldb_dap_hint());
         };
         let args: Vec<String> = match &target.kind {
             TargetKind::CargoTests => vec!["--test-threads=1".into(), "--nocapture".into()],
@@ -1067,4 +1168,63 @@ fn strip_ansi(s: &str) -> String {
         out.push(c);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn touch_exe(dir: &Path, name: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("redact-debug-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn versioned_lldb_dap_is_found_highest_first() {
+        let d = tmp("versioned");
+        touch_exe(&d, "lldb-dap-17");
+        let want = touch_exe(&d, "lldb-dap-19");
+        touch_exe(&d, "lldb-vscode-15");
+        std::fs::write(d.join("lldb-dap-21"), "").unwrap(); // not executable
+        assert_eq!(find_lldb_dap_in(std::slice::from_ref(&d)), Some(want));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn exact_name_beats_versioned() {
+        let d = tmp("exact");
+        touch_exe(&d, "lldb-dap-19");
+        let want = touch_exe(&d, "lldb-dap");
+        assert_eq!(find_lldb_dap_in(std::slice::from_ref(&d)), Some(want));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn nothing_found_in_empty_or_missing_dirs() {
+        let d = tmp("empty");
+        assert_eq!(
+            find_lldb_dap_in(&[d.clone(), PathBuf::from("/nonexistent/x")]),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn llvm_dir_version_parses() {
+        assert_eq!(llvm_version(Path::new("/usr/lib/llvm-19")), 19);
+        assert_eq!(llvm_version(Path::new("/usr/lib/llvm")), 0);
+    }
 }

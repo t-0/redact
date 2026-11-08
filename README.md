@@ -206,12 +206,19 @@ in the terminal profile.
   workspace dependencies. Versions come from the crates.io sparse index via
   `curl`, fetched in the background when the file is opened and cached for an
   hour; the status bar summarises once every crate has answered.
-- **Debugging** speaks the Debug Adapter Protocol to `lldb-dap` (found via
-  `xcrun`, `PATH`, or `REDACT_LLDB_DAP`) for Rust and to `debugpy` (through
-  `uv run --with debugpy`, or `python3 -m debugpy.adapter`) for Python. Rust
-  targets come from `cargo metadata`; launching runs `cargo build` (or
-  `cargo test --no-run`) with JSON messages to find the executable, loads the
-  Rust pretty-printers from the toolchain's `lldb_commands`, and then launches.
+- **Debugging** speaks the Debug Adapter Protocol to `lldb-dap` for Rust and
+  to `debugpy` (through `uv run --with debugpy`, or `python3 -m
+  debugpy.adapter`) for Python. `lldb-dap` is taken from `REDACT_LLDB_DAP` if
+  set, else found on `PATH` as `lldb-dap`, `lldb-vscode`, or a versioned
+  `lldb-dap-NN` (highest wins), then in `/usr/lib/llvm-NN/bin` (Debian and
+  Ubuntu put it there and only add versioned symlinks to `/usr/bin`), the
+  Homebrew `llvm` keg, and finally `xcrun` on macOS. On Linux that means the
+  distro's lldb package is enough: `apt install lldb`, `dnf install lldb` or
+  `pacman -S lldb`; on macOS the Xcode command line tools or `brew install
+  llvm`. Rust targets come from `cargo metadata`; launching runs `cargo build`
+  (or `cargo test --no-run`) with JSON messages to find the executable, loads
+  the Rust pretty-printers from the toolchain's `lldb_lookup.py`, and then
+  launches.
   Breakpoints live in the editor gutter (●), the stopped line is marked ▶, and
   program and adapter output go to a `debug` output tab.
 - **Tests** are discovered by scanning source (no compile), run with
@@ -230,3 +237,9 @@ in the terminal profile.
 ### v1.1
 
 - faster startup on large directories
+
+### v1.2
+
+- fixed repeated file system watcher triggers
+- cleaned up macos/linux debug app lookup
+- minor version dependency updates

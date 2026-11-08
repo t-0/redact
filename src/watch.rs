@@ -33,6 +33,12 @@ impl FsWatcher {
         let (tx, rx) = channel();
         let mut watcher = recommended_watcher(move |res: notify::Result<notify::Event>| {
             if let Ok(ev) = res {
+                // Reads produce Access events too (inotify IN_OPEN / IN_CLOSE_NOWRITE).
+                // Our own cargo check, test discovery and git status read the whole
+                // tree, so forwarding those would retrigger them forever.
+                if ev.kind.is_access() {
+                    return;
+                }
                 for p in ev.paths {
                     if !noisy(&p) {
                         let _ = tx.send(p);
