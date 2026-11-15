@@ -398,6 +398,8 @@ impl App {
             self.check_open_files();
         }
         self.drain_fs_events();
+        let root = self.root.clone();
+        self.tests.pump_discovery(&root);
         self.pump_debugger();
         if self.deps.pump() {
             self.dep_cache = None;
